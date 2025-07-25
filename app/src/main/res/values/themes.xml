@@ -1,0 +1,14 @@
+<!-- res/values/themes.xml -->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+        [오류 수정]
+        기존 Theme.AppCompat을 머티리얼3 테마로 변경합니다.
+        이렇게 해야 BottomNavigationView 같은 머티리얼 컴포넌트가 정상적으로 표시됩니다.
+    -->
+    <style name="Base.Theme.Mysilgurae" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Customize your light theme here. -->
+        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+    </style>
+
+    <style name="Theme.Mysilgurae" parent="Base.Theme.Mysilgurae" />
+</resources>
