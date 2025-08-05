@@ -1,31 +1,36 @@
 package com.example.mysilgurae.view
 
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.location.Geocoder
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
-import com.example.mysilgurae.data.ApartmentDeal
+import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import com.example.mysilgurae.MainActivity
 import com.example.mysilgurae.R
+import com.example.mysilgurae.data.ApartmentDeal
 import com.example.mysilgurae.viewmodel.ApartmentViewModel
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
 import java.io.IOException
-import java.text.SimpleDateFormat
 import java.util.*
 
-class MapFragment : Fragment(), OnMapReadyCallback, GoogleMap.OnCameraIdleListener, GoogleMap.OnMarkerClickListener {
+
+// [오류 수정!] OnMarkerClickListener를 OnInfoWindowClickListener로 변경합니다.
+class MapFragment : Fragment(), OnMapReadyCallback, GoogleMap.OnCameraIdleListener, GoogleMap.OnInfoWindowClickListener {
 
     private val viewModel: ApartmentViewModel by activityViewModels()
     private lateinit var googleMap: GoogleMap
@@ -47,25 +52,22 @@ class MapFragment : Fragment(), OnMapReadyCallback, GoogleMap.OnCameraIdleListen
         val initialPos = LatLng(37.5665, 126.9780)
         googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(initialPos, 12f))
 
-        // [추가!] 지도 이동 및 마커 클릭 리스너 설정
         googleMap.setOnCameraIdleListener(this)
-        googleMap.setOnMarkerClickListener(this)
+        // [수정!] 마커 클릭이 아닌, 정보창 클릭 리스너로 변경
+        googleMap.setOnInfoWindowClickListener(this)
+        // [추가!] 커스텀 정보창 어댑터 설정
+        googleMap.setInfoWindowAdapter(CustomInfoWindowAdapter(requireContext()))
 
         viewModel.deals.observe(viewLifecycleOwner) { deals ->
             googleMap.clear()
-            deals.forEach { deal ->
-                if (deal.latitude != null && deal.longitude != null) {
-                    val location = LatLng(deal.latitude!!, deal.longitude!!)
-                    val marker = googleMap.addMarker(
-                        MarkerOptions()
-                            .position(location)
-                            .title(deal.displayName)
-                            .snippet("거래가: ${deal.formattedPrice}만원")
-                    )
-                    // [추가!] 마커에 아파트 정보를 태그로 저장
-                    marker?.tag = deal
+            // [수정!] 아파트별로 그룹화하여 최신 거래가로 마커 생성
+            deals.groupBy { it.displayName + it.fullAddress }
+                .forEach { (_, dealsForApartment) ->
+                    val latestDeal = dealsForApartment.maxByOrNull { it.dealYear!! * 10000 + it.dealMonth!! * 100 + it.dealDay!! } ?: return@forEach
+                    if (latestDeal.latitude != null && latestDeal.longitude != null) {
+                        createCustomMarker(latestDeal)
+                    }
                 }
-            }
         }
 
         viewModel.cameraTarget.observe(viewLifecycleOwner) { latLng ->
@@ -74,6 +76,55 @@ class MapFragment : Fragment(), OnMapReadyCallback, GoogleMap.OnCameraIdleListen
                 viewModel.cameraTarget.postValue(null)
             }
         }
+    }
+
+
+    // [추가!] 커스텀 마커를 생성하고 지도에 추가하는 함수
+    private fun createCustomMarker(deal: ApartmentDeal) {
+        val markerView = (context?.getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater)
+            .inflate(R.layout.marker_layout, null)
+
+        val nameTextView = markerView.findViewById<TextView>(R.id.marker_apartment_name)
+        val priceTextView = markerView.findViewById<TextView>(R.id.marker_price)
+
+        nameTextView.text = deal.displayName
+        priceTextView.text = deal.formattedPrice
+
+        val markerBitmap = createBitmapFromView(markerView)
+
+        val location = LatLng(deal.latitude!!, deal.longitude!!)
+        val marker = googleMap.addMarker(
+            MarkerOptions()
+                .position(location)
+                .icon(BitmapDescriptorFactory.fromBitmap(markerBitmap))
+                .anchor(0.5f, 1.0f) // 마커의 하단 중앙에 위치 고정
+        )
+        marker?.tag = deal // 정보창에 사용할 데이터를 태그로 저장
+    }
+
+    // [추가!] View를 Bitmap으로 변환하는 함수
+    private fun createBitmapFromView(view: View): Bitmap {
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+        val bitmap = Bitmap.createBitmap(view.measuredWidth, view.measuredHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        view.draw(canvas)
+        return bitmap
+    }
+
+    // [수정!] 정보창이 클릭되었을 때 호출
+    override fun onInfoWindowClick(marker: Marker) {
+        val deal = marker.tag as? ApartmentDeal ?: return
+        val lawdCd = viewModel.currentLawdCd ?: return
+
+        val intent = Intent(context, DetailActivity::class.java).apply {
+            putExtra("APARTMENT_NAME", deal.displayName)
+            putExtra("LAWD_CD", lawdCd)
+        }
+        startActivity(intent)
     }
 
     // [추가!] 지도 이동이 멈췄을 때 호출되는 함수
@@ -98,18 +149,6 @@ class MapFragment : Fragment(), OnMapReadyCallback, GoogleMap.OnCameraIdleListen
         }
     }
 
-    // [추가!] 마커가 클릭되었을 때 호출되는 함수
-    override fun onMarkerClick(marker: Marker): Boolean {
-        val deal = marker.tag as? ApartmentDeal ?: return false
-        val lawdCd = viewModel.currentLawdCd ?: return false
-
-        val intent = Intent(context, DetailActivity::class.java).apply {
-            putExtra("APARTMENT_NAME", deal.displayName)
-            putExtra("LAWD_CD", lawdCd)
-        }
-        startActivity(intent)
-        return true // true를 반환하면 기본 정보창이 뜨지 않음
-    }
 
     // 임시로 주소에서 지역 코드를 추출하는 함수 (실제 앱에서는 더 정교한 로직 필요)
     private fun getTempLawdCd(address: String): String? {
