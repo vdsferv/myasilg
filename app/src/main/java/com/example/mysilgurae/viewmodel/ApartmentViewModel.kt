@@ -14,10 +14,13 @@ import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.google.android.gms.maps.model.LatLng
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
@@ -26,6 +29,8 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val apiService = RetrofitClient.instance
     private val geocoder = Geocoder(application, Locale.KOREA)
+    private val gson = Gson() // Gson 인스턴스 생성
+    private val cacheDir = File(application.cacheDir, "deals_cache") // 캐시 디렉토리 설정
 
     private val _deals = MutableLiveData<List<ApartmentDeal>>()
     val deals: LiveData<List<ApartmentDeal>> = _deals
@@ -55,20 +60,92 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
     val cameraTarget = MutableLiveData<LatLng?>()
     var currentLawdCd: String? = null // 현재 조회된 지역 코드 저장
 
+    init {
+        // 앱 시작 시 캐시 디렉토리가 없으면 생성
+        if (!cacheDir.exists()) {
+            cacheDir.mkdirs()
+        }
+    }
+
     fun fetchApartmentDeals(serviceKey: String, lawdCd: String, dealYmd: String) {
-        if (currentLawdCd == lawdCd) return // 이미 같은 지역을 조회했다면 다시 호출하지 않음
+        if (currentLawdCd == lawdCd) return
 
         _isLoading.value = true
-        currentLawdCd = lawdCd // 현재 지역 코드 저장
-        viewModelScope.launch {
+        currentLawdCd = lawdCd
+
+        viewModelScope.launch(Dispatchers.IO) {
+            // 1. 캐시에서 데이터 로드를 먼저 시도
+            val cachedDeals = loadDealsFromCache(lawdCd)
+            if (cachedDeals != null) {
+                Log.d("Cache", "$lawdCd 지역 데이터를 캐시에서 불러왔습니다.")
+                _deals.postValue(cachedDeals)
+                _isLoading.postValue(false)
+                return@launch // 캐시 로드 성공 시, API 호출 없이 종료
+            }
+
+            // 2. 캐시가 없으면 API 호출
+            Log.d("Cache", "$lawdCd 지역 캐시가 없어 API를 호출합니다.")
             try {
                 val response = apiService.getApartmentDeals(serviceKey, lawdCd, dealYmd)
                 val dealsFromApi = response.body?.items?.itemList ?: emptyList()
-                geocodeDealsInBackground(dealsFromApi)
+                geocodeAndCacheDeals(dealsFromApi, lawdCd)
             } catch (e: Exception) {
                 _error.postValue("데이터를 불러오는 데 실패했습니다: ${e.message}")
                 _isLoading.postValue(false)
             }
+        }
+    }
+
+    private suspend fun geocodeAndCacheDeals(deals: List<ApartmentDeal>, lawdCd: String) {
+        val geocodedDeals = deals.mapNotNull { deal ->
+            try {
+                val addressList = geocoder.getFromLocationName(deal.fullAddress, 1)
+                if (!addressList.isNullOrEmpty()) {
+                    deal.latitude = addressList[0].latitude
+                    deal.longitude = addressList[0].longitude
+                    deal
+                } else { null }
+            } catch (e: IOException) { null }
+        }
+        // 3. 좌표 변환이 끝난 데이터를 파일에 저장
+        saveDealsToCache(lawdCd, geocodedDeals)
+        _deals.postValue(geocodedDeals)
+        _isLoading.postValue(false)
+    }
+
+    // [추가!] 데이터를 파일에 저장하는 함수
+    private fun saveDealsToCache(lawdCd: String, deals: List<ApartmentDeal>) {
+        val cacheFile = File(cacheDir, "$lawdCd.json")
+        try {
+            val jsonString = gson.toJson(deals)
+            cacheFile.writeText(jsonString)
+            Log.d("Cache", "$lawdCd 지역 데이터를 파일에 저장했습니다.")
+        } catch (e: Exception) {
+            Log.e("Cache", "캐시 파일 저장 실패", e)
+        }
+    }
+
+    // [추가!] 파일에서 데이터를 읽어오는 함수
+    private fun loadDealsFromCache(lawdCd: String): List<ApartmentDeal>? {
+        val cacheFile = File(cacheDir, "$lawdCd.json")
+        if (!cacheFile.exists()) return null
+
+        // 캐시 유효기간 정책 (예: 하루 지난 파일은 무효화)
+        val oneDayInMillis = 24 * 60 * 60 * 1000
+        val isExpired = System.currentTimeMillis() - cacheFile.lastModified() > oneDayInMillis
+        if (isExpired) {
+            Log.d("Cache", "$lawdCd 지역 캐시 파일이 만료되어 삭제합니다.")
+            cacheFile.delete()
+            return null
+        }
+
+        return try {
+            val jsonString = cacheFile.readText()
+            val type = object : TypeToken<List<ApartmentDeal>>() {}.type
+            gson.fromJson(jsonString, type)
+        } catch (e: Exception) {
+            Log.e("Cache", "캐시 파일 읽기 실패", e)
+            null
         }
     }
 

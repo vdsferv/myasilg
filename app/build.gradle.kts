@@ -90,4 +90,8 @@ dependencies {
 
     // [추가!] MPAndroidChart 라이브러리
     implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
+
+    // [추가!] Google Gson 라이브러리 (JSON <-> 객체 변환용)
+    implementation("com.google.code.gson:gson:2.10.1")
+
 }
