@@ -30,7 +30,8 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
     private val apiService = RetrofitClient.instance
     private val geocoder = Geocoder(application, Locale.KOREA)
     private val gson = Gson() // Gson 인스턴스 생성
-    private val cacheDir = File(application.cacheDir, "deals_cache") // 캐시 디렉토리 설정
+    private val dealsCacheDir = File(application.cacheDir, "deals_cache") // 지도 데이터 캐시
+    private val historyCacheDir = File(application.cacheDir, "history_cache") // 상세 내역 캐시
 
     private val _deals = MutableLiveData<List<ApartmentDeal>>()
     val deals: LiveData<List<ApartmentDeal>> = _deals
@@ -61,10 +62,8 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
     var currentLawdCd: String? = null // 현재 조회된 지역 코드 저장
 
     init {
-        // 앱 시작 시 캐시 디렉토리가 없으면 생성
-        if (!cacheDir.exists()) {
-            cacheDir.mkdirs()
-        }
+        if (!dealsCacheDir.exists()) dealsCacheDir.mkdirs()
+        if (!historyCacheDir.exists()) historyCacheDir.mkdirs()
     }
 
     fun fetchApartmentDeals(serviceKey: String, lawdCd: String, dealYmd: String) {
@@ -115,7 +114,7 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
 
     // [추가!] 데이터를 파일에 저장하는 함수
     private fun saveDealsToCache(lawdCd: String, deals: List<ApartmentDeal>) {
-        val cacheFile = File(cacheDir, "$lawdCd.json")
+        val cacheFile = File(dealsCacheDir, "$lawdCd.json")
         try {
             val jsonString = gson.toJson(deals)
             cacheFile.writeText(jsonString)
@@ -127,7 +126,7 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
 
     // [추가!] 파일에서 데이터를 읽어오는 함수
     private fun loadDealsFromCache(lawdCd: String): List<ApartmentDeal>? {
-        val cacheFile = File(cacheDir, "$lawdCd.json")
+        val cacheFile = File(dealsCacheDir, "$lawdCd.json")
         if (!cacheFile.exists()) return null
 
         // 캐시 유효기간 정책 (예: 하루 지난 파일은 무효화)
@@ -166,12 +165,25 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    // [추가!] 10년치(120개월) 데이터를 비동기적으로 조회하는 함수
+    // [수정!] 상세 정보 조회 함수에 캐싱 로직 추가
     fun fetchHistoricalDeals(serviceKey: String, lawdCd: String, apartmentName: String) {
         _isLoading.value = true
         _historicalDeals.value = emptyList()
+        val cacheKey = "${lawdCd}_${apartmentName}" // 캐시 파일 이름 생성
 
         viewModelScope.launch(Dispatchers.IO) {
+            // 1. 상세 내역 캐시 먼저 확인
+            val cachedDeals = loadHistoricalDealsFromCache(cacheKey)
+            if (cachedDeals != null) {
+                Log.d("Cache", "$apartmentName 상세 내역을 캐시에서 불러왔습니다.")
+                _historicalDeals.postValue(cachedDeals)
+                processHistoricalData(cachedDeals) // 후처리
+                _isLoading.postValue(false)
+                return@launch
+            }
+
+            // 2. 캐시 없으면 API 호출
+            Log.d("Cache", "$apartmentName 상세 내역 캐시가 없어 API를 호출합니다.")
             try {
                 val dateFormat = SimpleDateFormat("yyyyMM", Locale.getDefault())
                 val deferreds = (0 until 120).map { i ->
@@ -185,8 +197,11 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
                 val allDeals = deferreds.awaitAll().flatten()
-                _historicalDeals.postValue(allDeals)
 
+                // 3. API 호출 성공 시, 결과를 캐시에 저장
+                saveHistoricalDealsToCache(cacheKey, allDeals)
+
+                _historicalDeals.postValue(allDeals)
                 processHistoricalData(allDeals)
 
             } catch (e: Exception) {
@@ -194,6 +209,41 @@ class ApartmentViewModel(application: Application) : AndroidViewModel(applicatio
             } finally {
                 _isLoading.postValue(false)
             }
+        }
+    }
+
+    // [추가!] 상세 내역을 파일에 저장하는 함수
+    private fun saveHistoricalDealsToCache(cacheKey: String, deals: List<ApartmentDeal>) {
+        val cacheFile = File(historyCacheDir, "$cacheKey.json")
+        try {
+            val jsonString = gson.toJson(deals)
+            cacheFile.writeText(jsonString)
+            Log.d("Cache", "$cacheKey 상세 내역을 파일에 저장했습니다.")
+        } catch (e: Exception) {
+            Log.e("Cache", "상세 내역 캐시 저장 실패", e)
+        }
+    }
+
+    // [추가!] 파일에서 상세 내역을 읽어오는 함수
+    private fun loadHistoricalDealsFromCache(cacheKey: String): List<ApartmentDeal>? {
+        val cacheFile = File(historyCacheDir, "$cacheKey.json")
+        if (!cacheFile.exists()) return null
+
+        val oneDayInMillis = 24 * 60 * 60 * 1000
+        val isExpired = System.currentTimeMillis() - cacheFile.lastModified() > oneDayInMillis
+        if (isExpired) {
+            Log.d("Cache", "$cacheKey 상세 내역 캐시가 만료되어 삭제합니다.")
+            cacheFile.delete()
+            return null
+        }
+
+        return try {
+            val jsonString = cacheFile.readText()
+            val type = object : TypeToken<List<ApartmentDeal>>() {}.type
+            gson.fromJson(jsonString, type)
+        } catch (e: Exception) {
+            Log.e("Cache", "상세 내역 캐시 읽기 실패", e)
+            null
         }
     }
 
